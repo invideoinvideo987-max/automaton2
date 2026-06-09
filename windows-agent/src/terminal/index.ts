@@ -55,14 +55,24 @@ export class CopilotTerminal extends EventEmitter {
   }
 
   /**
+   * Safely escape a string for shell command arguments
+   */
+  private escapeForShell(input: string): string {
+    // Remove any characters that could be used for shell injection
+    // Allow only alphanumeric, spaces, basic punctuation
+    return input.replace(/[^\w\s.,;:!?@#%&*()+=\-/\\[\]{}'"<>~`|^$]/g, "");
+  }
+
+  /**
    * Ask Copilot to suggest a command for a given task
    */
   async suggest(prompt: string, type: "shell" | "gh" | "git" = "shell"): Promise<CopilotResponse> {
     const start = Date.now();
+    const sanitizedPrompt = this.escapeForShell(prompt);
     
     try {
       const { stdout, stderr } = await execAsync(
-        `gh copilot suggest -t ${type} "${prompt.replace(/"/g, '\\"')}"`,
+        `gh copilot suggest -t ${type} "${sanitizedPrompt}"`,
         { timeout: 60000 }
       );
 
@@ -104,10 +114,11 @@ export class CopilotTerminal extends EventEmitter {
    */
   async explain(command: string): Promise<CopilotResponse> {
     const start = Date.now();
+    const sanitizedCommand = this.escapeForShell(command);
 
     try {
       const { stdout } = await execAsync(
-        `gh copilot explain "${command.replace(/"/g, '\\"')}"`,
+        `gh copilot explain "${sanitizedCommand}"`,
         { timeout: 60000 }
       );
 

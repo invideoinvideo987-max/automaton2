@@ -59,13 +59,25 @@ export function getShellArgs(): string[] {
 }
 
 /**
+ * Escape a string for safe use in shell commands
+ */
+function escapeShellArg(arg: string): string {
+  if (PLATFORM === "windows") {
+    // PowerShell: use single quotes and escape internal single quotes
+    return `'${arg.replace(/'/g, "''")}'`;
+  }
+  // Bash: use single quotes and escape internal single quotes
+  return `'${arg.replace(/'/g, "'\\''")}'`;
+}
+
+/**
  * Execute a shell command with platform-appropriate shell
  */
 export async function shellExec(command: string): Promise<{ stdout: string; stderr: string }> {
   const shell = getShell();
   const args = getShellArgs();
 
-  return execAsync(`${shell} ${args.join(" ")} "${command.replace(/"/g, '\\"')}"`, {
+  return execAsync(`${shell} ${args.join(" ")} ${escapeShellArg(command)}`, {
     timeout: 30000,
     maxBuffer: 1024 * 1024,
   });
@@ -82,7 +94,7 @@ export function shellSpawn(command: string, args: string[] = []) {
 }
 
 /**
- * Store a secret securely (Windows Credential Manager or encrypted file)
+ * Store a secret securely (Windows DPAPI or encrypted file)
  */
 export async function storeSecret(key: string, value: string): Promise<void> {
   const secretsDir = path.join(getAgentDataDir(), "secrets");
@@ -92,9 +104,10 @@ export async function storeSecret(key: string, value: string): Promise<void> {
 
   if (PLATFORM === "windows") {
     // Use Windows DPAPI via PowerShell for encryption
+    // Pass value via environment variable to avoid shell injection
     const encrypted = execSync(
-      `powershell -Command "[Convert]::ToBase64String([System.Security.Cryptography.ProtectedData]::Protect([System.Text.Encoding]::UTF8.GetBytes('${value}'), $null, 'CurrentUser'))"`,
-      { encoding: "utf-8" }
+      `powershell -NoProfile -Command "[Convert]::ToBase64String([System.Security.Cryptography.ProtectedData]::Protect([System.Text.Encoding]::UTF8.GetBytes($env:AUTOMATON_SECRET), $null, 'CurrentUser'))"`,
+      { encoding: "utf-8", env: { ...process.env, AUTOMATON_SECRET: value } }
     ).trim();
     fs.writeFileSync(path.join(secretsDir, `${key}.enc`), encrypted, { mode: 0o600 });
   } else {
@@ -113,9 +126,10 @@ export async function retrieveSecret(key: string): Promise<string | null> {
     const filePath = path.join(secretsDir, `${key}.enc`);
     if (!fs.existsSync(filePath)) return null;
     const encrypted = fs.readFileSync(filePath, "utf-8");
+    // Pass encrypted value via environment variable to avoid shell injection
     const decrypted = execSync(
-      `powershell -Command "[System.Text.Encoding]::UTF8.GetString([System.Security.Cryptography.ProtectedData]::Unprotect([Convert]::FromBase64String('${encrypted}'), $null, 'CurrentUser'))"`,
-      { encoding: "utf-8" }
+      `powershell -NoProfile -Command "[System.Text.Encoding]::UTF8.GetString([System.Security.Cryptography.ProtectedData]::Unprotect([Convert]::FromBase64String($env:AUTOMATON_ENC), $null, 'CurrentUser'))"`,
+      { encoding: "utf-8", env: { ...process.env, AUTOMATON_ENC: encrypted } }
     ).trim();
     return decrypted;
   } else {

@@ -355,6 +355,8 @@ export async function runAgentLoop(
   }
 
   // ─── Performance: Reusable objects (avoid per-turn allocations) ──
+  // These are reused across turns within a single wake cycle. The agent loop
+  // is single-threaded (no concurrent invocation), so no thread-safety issues.
   const cachedRetriever = new MemoryRetriever(db.raw, DEFAULT_MEMORY_BUDGET);
   const cachedIngestion = new MemoryIngestionPipeline(db.raw);
 

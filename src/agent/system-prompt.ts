@@ -26,8 +26,11 @@ import { getLineageSummary } from "../replication/lineage.js";
 import { sanitizeInput } from "./injection-defense.js";
 import { loadCurrentSoul } from "../soul/model.js";
 
-// ─── File Cache for frequently-read immutable files ────────────────
-// Avoids repeated synchronous disk I/O on every turn.
+// ─── File Cache for frequently-read files ────────────────────────
+// Caches constitution.md, SOUL.md, WORKLOG.md with a 60s TTL to avoid
+// repeated synchronous disk I/O on every turn. These files are assumed
+// to be relatively static; external modifications will take up to 60s
+// to be reflected in the agent's prompts.
 const FILE_CACHE_TTL_MS = 60_000; // Re-read files at most once per minute
 const fileCache = new Map<string, { content: string | null; cachedAt: number }>();
 

@@ -71,6 +71,23 @@ const MAX_TOOL_CALLS_PER_TURN = 10;
 const MAX_CONSECUTIVE_ERRORS = 5;
 const MAX_REPETITIVE_TURNS = 3;
 
+// Module-level constant: avoid re-creating this Set on every turn
+const MUTATING_TOOLS = new Set([
+  "exec", "write_file", "edit_own_file", "transfer_credits", "topup_credits", "fund_child",
+  "spawn_child", "start_child", "delete_sandbox", "create_sandbox",
+  "install_npm_package", "install_mcp_server", "install_skill",
+  "create_skill", "remove_skill", "install_skill_from_git",
+  "install_skill_from_url", "pull_upstream", "git_commit", "git_push",
+  "git_branch", "git_clone", "send_message", "message_child",
+  "register_domain", "register_erc8004", "give_feedback",
+  "update_genesis_prompt", "update_agent_card", "modify_heartbeat",
+  "expose_port", "remove_port", "x402_fetch", "manage_dns",
+  "distress_signal", "prune_dead_children", "sleep",
+  "update_soul", "remember_fact", "set_goal", "complete_goal",
+  "save_procedure", "note_about_agent", "forget",
+  "enter_low_compute", "switch_model", "review_upstream_changes",
+]);
+
 export interface AgentLoopOptions {
   identity: AutomatonIdentity;
   config: AutomatonConfig;
@@ -337,6 +354,14 @@ export async function runAgentLoop(
     db.setKV("start_time", new Date().toISOString());
   }
 
+  // ─── Performance: Reusable objects (avoid per-turn allocations) ──
+  const cachedRetriever = new MemoryRetriever(db.raw, DEFAULT_MEMORY_BUDGET);
+  const cachedIngestion = new MemoryIngestionPipeline(db.raw);
+
+  // Financial state TTL cache: avoid hitting the API every single turn
+  const FINANCIAL_STATE_TTL_MS = 30_000; // 30 seconds
+  let lastFinancialFetch = 0;
+
   let consecutiveErrors = 0;
   let running = true;
   let lastToolPatterns: string[] = [];
@@ -359,6 +384,7 @@ export async function runAgentLoop(
 
   // Get financial state
   let financial = await getFinancialState(conway, identity.address, db, config.chainType || identity.chainType || "evm");
+  lastFinancialFetch = Date.now();
 
   // Check if this is the first run
   const isFirstRun = db.getTurnCount() === 0;
@@ -425,8 +451,11 @@ export async function runAgentLoop(
         }
       }
 
-      // Refresh financial state periodically
-      financial = await getFinancialState(conway, identity.address, db, config.chainType || identity.chainType || "evm");
+      // Refresh financial state periodically (TTL-based to reduce API calls)
+      if (Date.now() - lastFinancialFetch >= FINANCIAL_STATE_TTL_MS) {
+        financial = await getFinancialState(conway, identity.address, db, config.chainType || identity.chainType || "evm");
+        lastFinancialFetch = Date.now();
+      }
 
       // Check survival tier
       // api_unreachable: creditsCents === -1 means API failed with no cache.
@@ -462,6 +491,7 @@ export async function runAgentLoop(
                 // Re-fetch financial state after topup so the rest of
                 // the turn sees the updated balance.
                 financial = await getFinancialState(conway, identity.address, db, config.chainType || identity.chainType || "evm");
+                lastFinancialFetch = Date.now();
               }
             } catch (err: any) {
               logger.warn(`Inline auto-topup failed: ${err.message}`);
@@ -512,12 +542,11 @@ export async function runAgentLoop(
         isFirstRun,
       });
 
-      // Phase 2.2: Pre-turn memory retrieval
+      // Phase 2.2: Pre-turn memory retrieval (using cached retriever)
       let memoryBlock: string | undefined;
       try {
         const sessionId = db.getKV("session_id") || "default";
-        const retriever = new MemoryRetriever(db.raw, DEFAULT_MEMORY_BUDGET);
-        const memories = retriever.retrieve(sessionId, pendingInput?.content);
+        const memories = cachedRetriever.retrieve(sessionId, pendingInput?.content);
         if (memories.totalTokens > 0) {
           memoryBlock = formatMemoryBlock(memories);
         }
@@ -698,11 +727,10 @@ export async function runAgentLoop(
       });
       onTurnComplete?.(turn);
 
-      // Phase 2.2: Post-turn memory ingestion (non-blocking)
+      // Phase 2.2: Post-turn memory ingestion (non-blocking, using cached pipeline)
       try {
         const sessionId = db.getKV("session_id") || "default";
-        const ingestion = new MemoryIngestionPipeline(db.raw);
-        ingestion.ingest(sessionId, turn, turn.toolCalls);
+        cachedIngestion.ingest(sessionId, turn, turn.toolCalls);
       } catch (error) {
         logger.error("Memory ingestion failed", error instanceof Error ? error : undefined);
         // Memory failure must not block the agent loop
@@ -833,21 +861,6 @@ export async function runAgentLoop(
       // If this turn had no pending input and didn't do any real work
       // (no mutations — only read/check/list/info tools), count as idle.
       // Use a blocklist of mutating tools rather than an allowlist of safe ones.
-      const MUTATING_TOOLS = new Set([
-        "exec", "write_file", "edit_own_file", "transfer_credits", "topup_credits", "fund_child",
-        "spawn_child", "start_child", "delete_sandbox", "create_sandbox",
-        "install_npm_package", "install_mcp_server", "install_skill",
-        "create_skill", "remove_skill", "install_skill_from_git",
-        "install_skill_from_url", "pull_upstream", "git_commit", "git_push",
-        "git_branch", "git_clone", "send_message", "message_child",
-        "register_domain", "register_erc8004", "give_feedback",
-        "update_genesis_prompt", "update_agent_card", "modify_heartbeat",
-        "expose_port", "remove_port", "x402_fetch", "manage_dns",
-        "distress_signal", "prune_dead_children", "sleep",
-        "update_soul", "remember_fact", "set_goal", "complete_goal",
-        "save_procedure", "note_about_agent", "forget",
-        "enter_low_compute", "switch_model", "review_upstream_changes",
-      ]);
       const didMutate = turn.toolCalls.some((tc) => MUTATING_TOOLS.has(tc.name));
 
       if (!currentInput && !didMutate) {

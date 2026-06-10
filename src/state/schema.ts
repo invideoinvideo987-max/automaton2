@@ -5,7 +5,7 @@
  * The database IS the automaton's memory.
  */
 
-export const SCHEMA_VERSION = 11;
+export const SCHEMA_VERSION = 12;
 
 export const CREATE_TABLES = `
   -- Schema version tracking
@@ -678,4 +678,20 @@ export const MIGRATION_V10 = `
 
   CREATE INDEX idx_knowledge_category ON knowledge_store(category);
   CREATE INDEX idx_knowledge_key ON knowledge_store(key);
+`;
+
+// === Performance Indices Migration ===
+export const MIGRATION_V12 = `
+  -- Schema version: 12
+  -- Performance indices for hot query paths
+
+  CREATE INDEX IF NOT EXISTS idx_episodic_session_created ON episodic_memory(session_id, created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_working_session_priority ON working_memory(session_id, priority DESC);
+  CREATE INDEX IF NOT EXISTS idx_semantic_category_key ON semantic_memory(category, key);
+  CREATE INDEX IF NOT EXISTS idx_goals_status_created ON goals(status, created_at);
+  CREATE INDEX IF NOT EXISTS idx_task_graph_status_priority ON task_graph(status, priority DESC);
+  CREATE INDEX IF NOT EXISTS idx_turns_timestamp_desc ON turns(timestamp DESC);
+  CREATE INDEX IF NOT EXISTS idx_tool_calls_name ON tool_calls(name);
+  CREATE INDEX IF NOT EXISTS idx_knowledge_category_key ON knowledge_store(category, key);
+  CREATE INDEX IF NOT EXISTS idx_children_status_address ON children(status, address);
 `;

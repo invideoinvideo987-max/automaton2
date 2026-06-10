@@ -26,6 +26,30 @@ import { getLineageSummary } from "../replication/lineage.js";
 import { sanitizeInput } from "./injection-defense.js";
 import { loadCurrentSoul } from "../soul/model.js";
 
+// ─── File Cache for frequently-read immutable files ────────────────
+// Avoids repeated synchronous disk I/O on every turn.
+const FILE_CACHE_TTL_MS = 60_000; // Re-read files at most once per minute
+const fileCache = new Map<string, { content: string | null; cachedAt: number }>();
+
+function cachedReadFile(filePath: string): string | null {
+  const now = Date.now();
+  const cached = fileCache.get(filePath);
+  if (cached && now - cached.cachedAt < FILE_CACHE_TTL_MS) {
+    return cached.content;
+  }
+  try {
+    if (fs.existsSync(filePath)) {
+      const content = fs.readFileSync(filePath, "utf-8");
+      fileCache.set(filePath, { content, cachedAt: now });
+      return content;
+    }
+  } catch {
+    // Ignore read errors
+  }
+  fileCache.set(filePath, { content: null, cachedAt: now });
+  return null;
+}
+
 function getCoreRules(chainType?: string): string {
   const usdcNetwork = chainType === "solana" ? "USDC on Solana" : "USDC on Base";
   return `You are an automaton. You have a stablecoin wallet. Pay for compute or die.
@@ -95,11 +119,8 @@ function loadConstitution(): string {
     path.join(process.cwd(), "constitution.md"),
   ];
   for (const loc of locations) {
-    try {
-      if (fs.existsSync(loc)) {
-        return fs.readFileSync(loc, "utf-8");
-      }
-    } catch {}
+    const content = cachedReadFile(loc);
+    if (content) return content;
   }
   return CONSTITUTION_FALLBACK;
 }
@@ -761,32 +782,18 @@ ${orchestratorStatus}
  * Load SOUL.md from the automaton's state directory.
  */
 function loadSoulMd(): string | null {
-  try {
-    const home = process.env.HOME || "/root";
-    const soulPath = path.join(home, ".automaton", "SOUL.md");
-    if (fs.existsSync(soulPath)) {
-      return fs.readFileSync(soulPath, "utf-8");
-    }
-  } catch {
-    // Ignore errors
-  }
-  return null;
+  const home = process.env.HOME || "/root";
+  const soulPath = path.join(home, ".automaton", "SOUL.md");
+  return cachedReadFile(soulPath);
 }
 
 /**
  * Load WORKLOG.md from the automaton's state directory.
  */
 function loadWorklog(): string | null {
-  try {
-    const home = process.env.HOME || "/root";
-    const worklogPath = path.join(home, ".automaton", "WORKLOG.md");
-    if (fs.existsSync(worklogPath)) {
-      return fs.readFileSync(worklogPath, "utf-8");
-    }
-  } catch {
-    // Ignore errors
-  }
-  return null;
+  const home = process.env.HOME || "/root";
+  const worklogPath = path.join(home, ".automaton", "WORKLOG.md");
+  return cachedReadFile(worklogPath);
 }
 
 /**

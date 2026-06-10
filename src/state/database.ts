@@ -46,6 +46,7 @@ import {
   MIGRATION_V9_ALTER_CHILDREN_ROLE,
   MIGRATION_V10,
   MIGRATION_V11,
+  MIGRATION_V12,
 } from "./schema.js";
 import type {
   RiskLevel,
@@ -88,6 +89,11 @@ export function createDatabase(dbPath: string): AutomatonDatabase {
   db.pragma("journal_mode = WAL");
   db.pragma("wal_autocheckpoint = 1000");
   db.pragma("foreign_keys = ON");
+  // Performance pragmas: reduce fsync overhead, enable mmap, larger cache
+  db.pragma("synchronous = NORMAL");
+  db.pragma("cache_size = -64000"); // 64MB cache
+  db.pragma("mmap_size = 268435456"); // 256MB mmap
+  db.pragma("temp_store = MEMORY");
 
   // Integrity check on startup
   const integrity = db.pragma("integrity_check") as { integrity_check: string }[];
@@ -115,17 +121,28 @@ export function createDatabase(dbPath: string): AutomatonDatabase {
     ).run(SCHEMA_VERSION);
   }
 
+  // ─── Prepared Statement Cache ──────────────────────────────────
+  // Cache frequently-used statements to avoid repeated prepare() calls
+  const stmtCache = new Map<string, BetterSqlite3.Statement>();
+  function stmt(sql: string): BetterSqlite3.Statement {
+    let s = stmtCache.get(sql);
+    if (!s) {
+      s = db.prepare(sql);
+      stmtCache.set(sql, s);
+    }
+    return s;
+  }
+
   // ─── Identity ────────────────────────────────────────────────
 
   const getIdentity = (key: string): string | undefined => {
-    const row = db
-      .prepare("SELECT value FROM identity WHERE key = ?")
+    const row = stmt("SELECT value FROM identity WHERE key = ?")
       .get(key) as { value: string } | undefined;
     return row?.value;
   };
 
   const setIdentity = (key: string, value: string): void => {
-    db.prepare(
+    stmt(
       "INSERT OR REPLACE INTO identity (key, value) VALUES (?, ?)",
     ).run(key, value);
   };
@@ -133,7 +150,7 @@ export function createDatabase(dbPath: string): AutomatonDatabase {
   // ─── Turns ───────────────────────────────────────────────────
 
   const insertTurn = (turn: AgentTurn): void => {
-    db.prepare(
+    stmt(
       `INSERT INTO turns (id, timestamp, state, input, input_source, thinking, tool_calls, token_usage, cost_cents)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
@@ -150,24 +167,20 @@ export function createDatabase(dbPath: string): AutomatonDatabase {
   };
 
   const getRecentTurns = (limit: number): AgentTurn[] => {
-    const rows = db
-      .prepare(
-        "SELECT * FROM turns ORDER BY timestamp DESC LIMIT ?",
-      )
-      .all(limit) as any[];
+    const rows = stmt(
+      "SELECT * FROM turns ORDER BY timestamp DESC LIMIT ?",
+    ).all(limit) as any[];
     return rows.map(deserializeTurn).reverse();
   };
 
   const getTurnById = (id: string): AgentTurn | undefined => {
-    const row = db
-      .prepare("SELECT * FROM turns WHERE id = ?")
+    const row = stmt("SELECT * FROM turns WHERE id = ?")
       .get(id) as any | undefined;
     return row ? deserializeTurn(row) : undefined;
   };
 
   const getTurnCount = (): number => {
-    const row = db
-      .prepare("SELECT COUNT(*) as count FROM turns")
+    const row = stmt("SELECT COUNT(*) as count FROM turns")
       .get() as { count: number };
     return row.count;
   };
@@ -178,7 +191,7 @@ export function createDatabase(dbPath: string): AutomatonDatabase {
     turnId: string,
     call: ToolCallResult,
   ): void => {
-    db.prepare(
+    stmt(
       `INSERT INTO tool_calls (id, turn_id, name, arguments, result, duration_ms, error)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
     ).run(
@@ -193,8 +206,7 @@ export function createDatabase(dbPath: string): AutomatonDatabase {
   };
 
   const getToolCallsForTurn = (turnId: string): ToolCallResult[] => {
-    const rows = db
-      .prepare("SELECT * FROM tool_calls WHERE turn_id = ?")
+    const rows = stmt("SELECT * FROM tool_calls WHERE turn_id = ?")
       .all(turnId) as any[];
     return rows.map(deserializeToolCall);
   };
@@ -316,25 +328,23 @@ export function createDatabase(dbPath: string): AutomatonDatabase {
   // ─── Key-Value Store ─────────────────────────────────────────
 
   const getKV = (key: string): string | undefined => {
-    const row = db
-      .prepare("SELECT value FROM kv WHERE key = ?")
+    const row = stmt("SELECT value FROM kv WHERE key = ?")
       .get(key) as { value: string } | undefined;
     return row?.value;
   };
 
   const setKV = (key: string, value: string): void => {
-    db.prepare(
+    stmt(
       "INSERT OR REPLACE INTO kv (key, value, updated_at) VALUES (?, ?, datetime('now'))",
     ).run(key, value);
   };
 
   const deleteKV = (key: string): void => {
-    db.prepare("DELETE FROM kv WHERE key = ?").run(key);
+    stmt("DELETE FROM kv WHERE key = ?").run(key);
   };
 
   const deleteKVReturning = (key: string): string | undefined => {
-    const row = db
-      .prepare("DELETE FROM kv WHERE key = ? RETURNING value")
+    const row = stmt("DELETE FROM kv WHERE key = ? RETURNING value")
       .get(key) as { value: string } | undefined;
     return row?.value;
   };
@@ -345,7 +355,7 @@ export function createDatabase(dbPath: string): AutomatonDatabase {
     const query = enabledOnly
       ? "SELECT * FROM skills WHERE enabled = 1"
       : "SELECT * FROM skills";
-    const rows = db.prepare(query).all() as any[];
+    const rows = stmt(query).all() as any[];
     return rows.map(deserializeSkill);
   };
 
@@ -623,6 +633,12 @@ function applyMigrations(db: DatabaseType): void {
       version: 11,
       apply: () => {
         try { db.exec(MIGRATION_V11); } catch { /* column may already exist */ }
+      },
+    },
+    {
+      version: 12,
+      apply: () => {
+        db.exec(MIGRATION_V12);
       },
     },
   ];
